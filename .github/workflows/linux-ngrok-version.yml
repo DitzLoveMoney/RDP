@@ -1,0 +1,261 @@
+name: Ubuntu SSH [ngrok TCP]
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-ssh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+
+      # ==========================================
+      # INSTALL SSH SERVER
+      # ==========================================
+      - name: Configure SSH
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
+
+          sudo systemctl enable ssh
+          sudo systemctl start ssh
+
+          echo "SSH server started."
+
+      # ==========================================
+      # CONFIGURE ROOT SSH
+      # ==========================================
+      - name: Configure Root SSH
+        shell: bash
+        env:
+          SSH_ROOT_PASSWORD: ${{ secrets.SSH_ROOT_PASSWORD }}
+        run: |
+          if [ -z "$SSH_ROOT_PASSWORD" ]; then
+            echo "SSH_ROOT_PASSWORD is empty."
+            exit 1
+          fi
+
+          echo "root:$SSH_ROOT_PASSWORD" | sudo chpasswd
+
+          sudo sed -i \
+            's/^#\?PermitRootLogin .*/PermitRootLogin yes/' \
+            /etc/ssh/sshd_config
+
+          sudo sed -i \
+            's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' \
+            /etc/ssh/sshd_config
+
+          if ! sudo grep -q "^PermitRootLogin" /etc/ssh/sshd_config; then
+            echo "PermitRootLogin yes" | sudo tee -a /etc/ssh/sshd_config
+          fi
+
+          if ! sudo grep -q "^PasswordAuthentication" /etc/ssh/sshd_config; then
+            echo "PasswordAuthentication yes" | sudo tee -a /etc/ssh/sshd_config
+          fi
+
+          sudo sshd -t
+          sudo systemctl restart ssh
+
+          echo "Root SSH configured."
+
+      # ==========================================
+      # INSTALL JAVA 21
+      # ==========================================
+      - name: Install Java 21
+        shell: bash
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            openjdk-21-jdk
+
+          echo "Java installation completed."
+
+      # ==========================================
+      # VERIFY JAVA
+      # ==========================================
+      - name: Verify Java
+        shell: bash
+        run: |
+          echo "Java version:"
+          java -version
+
+          echo ""
+          echo "Java location:"
+          which java
+
+          echo ""
+          echo "JAVA_HOME:"
+          readlink -f "$(which java)" | sed 's:/bin/java::'
+
+      # ==========================================
+      # DOWNLOAD NGROK
+      # ==========================================
+      - name: Download ngrok
+        shell: bash
+        run: |
+          curl -L \
+            https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.zip \
+            -o ngrok.zip
+
+          unzip -o ngrok.zip
+
+          chmod +x ngrok
+
+          sudo mv ngrok /usr/local/bin/ngrok
+
+          ngrok version
+
+      # ==========================================
+      # AUTHENTICATE NGROK
+      # ==========================================
+      - name: Authenticate ngrok
+        shell: bash
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+        run: |
+          if [ -z "$NGROK_AUTH_TOKEN" ]; then
+            echo "NGROK_AUTH_TOKEN is empty."
+            exit 1
+          fi
+
+          ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
+
+          echo "ngrok authentication successful."
+
+      # ==========================================
+      # VERIFY SSH
+      # ==========================================
+      - name: Verify SSH
+        shell: bash
+        run: |
+          echo "Checking SSH..."
+
+          sudo ss -tlnp | grep ':22'
+
+          echo ""
+          echo "Testing SSH configuration..."
+
+          sudo sshd -t
+
+          echo ""
+          echo "SSH is ready."
+
+      # ==========================================
+      # START NGROK TCP
+      # ==========================================
+      - name: Start ngrok TCP Tunnel
+        shell: bash
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "        NGROK SSH STARTING"
+          echo "=========================================="
+          echo ""
+
+          nohup ngrok tcp 22 \
+            --log=stdout \
+            > ngrok.log 2>&1 &
+
+          echo $! > ngrok.pid
+
+          echo "Waiting for ngrok..."
+
+          NGROK_URL=""
+
+          for i in {1..20}; do
+
+            sleep 2
+
+            if curl -s \
+              http://127.0.0.1:4040/api/tunnels \
+              > tunnels.json; then
+
+              NGROK_URL=$(python3 -c '
+          import json
+
+          try:
+              data = json.load(open("tunnels.json"))
+              tunnels = data.get("tunnels", [])
+
+              tcp = next(
+                  (x for x in tunnels if x.get("proto") == "tcp"),
+                  None
+              )
+
+              print(tcp.get("public_url", "") if tcp else "")
+
+          except:
+              print("")
+          ')
+
+              if [ -n "$NGROK_URL" ]; then
+                break
+              fi
+
+            fi
+
+          done
+
+          if [ -z "$NGROK_URL" ]; then
+            echo "Failed to obtain ngrok TCP endpoint."
+            echo ""
+            cat ngrok.log
+            exit 1
+          fi
+
+          echo ""
+          echo "=========================================="
+          echo "          SSH ACCESS READY"
+          echo "=========================================="
+          echo ""
+          echo "SSH Endpoint : $NGROK_URL"
+          echo "SSH User     : root"
+          echo "SSH Port     : 22"
+          echo ""
+          echo "Java:"
+          java -version
+          echo ""
+          echo "=========================================="
+          echo ""
+
+      # ==========================================
+      # KEEP RUNNER ALIVE
+      # ==========================================
+      - name: Keep Runner Alive
+        shell: bash
+        run: |
+          while true; do
+
+            echo ""
+            echo "[$(date)] Ubuntu SSH Active"
+
+            if curl -s \
+              http://127.0.0.1:4040/api/tunnels \
+              > /tmp/tunnels.json; then
+
+              python3 - <<'PY'
+          import json
+
+          try:
+              data = json.load(open("/tmp/tunnels.json"))
+
+              for tunnel in data.get("tunnels", []):
+                  if tunnel.get("proto") == "tcp":
+                      print("SSH Endpoint:", tunnel.get("public_url"))
+
+          except:
+              pass
+          PY
+
+            fi
+
+            echo "SSH User: root"
+
+            java -version 2>&1 | head -n 1
+
+            sleep 300
+
+          done
