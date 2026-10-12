@@ -1,0 +1,65 @@
+name: Ubuntu SSH [Tailscale Version]
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-ssh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Configure SSH
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
+
+          sudo systemctl enable ssh
+          sudo systemctl start ssh
+
+      - name: Create SSH User
+        run: |
+          USERNAME="HorizoneA1"
+          PASSWORD="AdminHZ123"
+
+          sudo useradd -m -s /bin/bash "$USERNAME"
+
+          echo "$USERNAME:$PASSWORD" | sudo chpasswd
+
+          sudo usermod -aG sudo "$USERNAME"
+
+          echo "SSH_USER=$USERNAME" >> "$GITHUB_ENV"
+
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Connect Tailscale
+        run: |
+          sudo tailscale up \
+            --auth-key="${{ secrets.TAILSCALE_AUTH_KEY }}" \
+            --hostname="gh-ubuntu-${GITHUB_RUN_ID}"
+
+      - name: Get Tailscale IP
+        run: |
+          TS_IP=$(tailscale ip -4)
+
+          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
+
+          echo "================================"
+          echo "Ubuntu SSH"
+          echo "IP: $TS_IP"
+          echo "User: $SSH_USER"
+          echo "Port: 22"
+          echo "================================"
+
+      - name: Verify SSH
+        run: |
+          sudo ss -tlnp | grep ':22'
+
+      - name: Keep Runner Alive
+        run: |
+          while true; do
+            echo "[$(date)] Ubuntu SSH Active"
+            sleep 300
+          done
