@@ -1,0 +1,189 @@
+name: Windows RDP [ngrok TCP]
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+
+    # ==========================================
+    # CONFIGURE RDP
+    # ==========================================
+    - name: Configure RDP
+      shell: powershell
+      run: |
+        Write-Host "Configuring RDP..."
+
+        Set-ItemProperty `
+          -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+          -Name "fDenyTSConnections" `
+          -Value 0 `
+          -Force
+
+        Set-ItemProperty `
+          -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+          -Name "UserAuthentication" `
+          -Value 1 `
+          -Force
+
+        Enable-NetFirewallRule `
+          -DisplayGroup "Remote Desktop"
+
+        Restart-Service `
+          -Name TermService `
+          -Force
+
+        Write-Host "RDP enabled."
+
+    # ==========================================
+    # CONFIGURE RUNNERADMIN PASSWORD
+    # ==========================================
+    - name: Configure runneradmin
+      shell: powershell
+      env:
+        RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+      run: |
+        $username = "runneradmin"
+
+        Write-Host "Checking $username..."
+
+        $user = Get-LocalUser `
+          -Name $username `
+          -ErrorAction Stop
+
+        Write-Host "User found: $($user.Name)"
+        Write-Host "Enabled: $($user.Enabled)"
+
+        Add-LocalGroupMember `
+          -Group "Remote Desktop Users" `
+          -Member $username `
+          -ErrorAction SilentlyContinue
+
+        if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+          Write-Host "RDP_PASSWORD secret is empty."
+          exit 1
+        }
+
+        $securePassword = ConvertTo-SecureString `
+          $env:RDP_PASSWORD `
+          -AsPlainText `
+          -Force
+
+        Set-LocalUser `
+          -Name $username `
+          -Password $securePassword
+
+        Write-Host "runneradmin configured successfully."
+
+    # ==========================================
+    # INSTALL NGROK
+    # ==========================================
+    - name: Download ngrok
+      shell: powershell
+      run: |
+        Invoke-WebRequest `
+          "https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip" `
+          -OutFile "ngrok.zip"
+
+    - name: Extract ngrok
+      shell: powershell
+      run: |
+        Expand-Archive `
+          -Path "ngrok.zip" `
+          -DestinationPath "." `
+          -Force
+
+        .\ngrok\ngrok.exe version
+
+    # ==========================================
+    # NGROK AUTH
+    # ==========================================
+    - name: Authenticate ngrok
+      shell: powershell
+      env:
+        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+      run: |
+        if ([string]::IsNullOrWhiteSpace($env:NGROK_AUTH_TOKEN)) {
+          Write-Host "NGROK_AUTH_TOKEN secret is empty."
+          exit 1
+        }
+
+        .\ngrok\ngrok.exe authtoken $env:NGROK_AUTH_TOKEN
+
+        Write-Host "ngrok authentication successful."
+
+    # ==========================================
+    # INSTALL JAVA 21
+    # ==========================================
+    - name: Install Temurin Java 21
+      shell: powershell
+      run: |
+        $javaUrl = "https://api.adoptium.net/v3/installer/latest/21/ga/windows/x64/jdk/hotspot/normal/eclipse"
+
+        $javaInstaller = "$env:TEMP\temurin21.msi"
+
+        Invoke-WebRequest `
+          -Uri $javaUrl `
+          -OutFile $javaInstaller
+
+        Start-Process `
+          msiexec.exe `
+          -ArgumentList "/i", "`"$javaInstaller`"", "/quiet", "/norestart" `
+          -Wait
+
+        Remove-Item `
+          $javaInstaller `
+          -Force
+
+    # ==========================================
+    # VERIFY JAVA
+    # ==========================================
+    - name: Verify Java
+      shell: powershell
+      run: |
+        java -version
+        where.exe java
+
+    # ==========================================
+    # VERIFY RDP
+    # ==========================================
+    - name: Verify RDP
+      shell: powershell
+      run: |
+        Write-Host "Checking RDP port 3389..."
+
+        $result = Test-NetConnection `
+          -ComputerName "127.0.0.1" `
+          -Port 3389
+
+        if (-not $result.TcpTestSucceeded) {
+          Write-Host "RDP port 3389 is NOT accessible."
+          exit 1
+        }
+
+        Write-Host "RDP port 3389 is accessible."
+
+    # ==========================================
+    # START NGROK TCP
+    # ==========================================
+    - name: Create ngrok TCP Tunnel
+      shell: powershell
+      run: |
+        Write-Host ""
+        Write-Host "=========================================="
+        Write-Host "        NGROK RDP STARTING"
+        Write-Host "=========================================="
+        Write-Host ""
+        Write-Host "Username: runneradmin"
+        Write-Host "Password: GitHub Secret RDP_PASSWORD"
+        Write-Host ""
+        Write-Host "RDP Port: 3389"
+        Write-Host ""
+        Write-Host "=========================================="
+        Write-Host ""
+
+        .\ngrok\ngrok.exe tcp 3389
